@@ -83,7 +83,7 @@
       <thead><tr><th scope="col">Name</th><th scope="col">Typ</th><th scope="col" class="num">TTL</th><th scope="col">Wert</th></tr></thead>
       <tbody id="dns-body"></tbody>
     </table>
-    <p class="hint">Die Abfrage läuft über DNS-over-HTTPS bei Cloudflare (1.1.1.1). Dein Browser fragt dort direkt an.</p>
+    <p class="hint" id="dns-source">Die Abfrage läuft über DNS-over-HTTPS bei Cloudflare (1.1.1.1), bei Bedarf bei Google (8.8.8.8). Dein Browser fragt dort direkt an.</p>
   </section>
 </main>
 <script>
@@ -137,7 +137,11 @@
   document.getElementById("reload").addEventListener("click", load);
   load();
 
-  /* ---------- DNS-Abfrage (DNS-over-HTTPS, Cloudflare) ---------- */
+  /* ---------- DNS-Abfrage (DNS-over-HTTPS) ---------- */
+  const PROVIDERS = [
+    { label: "Cloudflare", url: (n, t) => "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(n) + "&type=" + encodeURIComponent(t), headers: { accept: "application/dns-json" } },
+    { label: "Google", url: (n, t) => "https://dns.google/resolve?name=" + encodeURIComponent(n) + "&type=" + encodeURIComponent(t), headers: undefined }
+  ];
   const TYPES = { 1:"A", 2:"NS", 5:"CNAME", 6:"SOA", 12:"PTR", 15:"MX", 16:"TXT", 28:"AAAA", 33:"SRV", 257:"CAA" };
   const STATUS = { 1:"Ungültige Anfrage (FORMERR)", 2:"Serverfehler beim Auflösen (SERVFAIL)", 3:"Der Name existiert nicht (NXDOMAIN)", 5:"Anfrage abgelehnt (REFUSED)" };
 
@@ -149,6 +153,8 @@
   const dnsInfo = document.getElementById("dns-info");
   const dnsTable = document.getElementById("dns-table");
   const dnsBody = document.getElementById("dns-body");
+  const dnsSource = document.getElementById("dns-source");
+  const DEFAULT_SOURCE = dnsSource.textContent;
 
   function normalizeName(raw) {
     let s = raw.trim();
@@ -172,9 +178,29 @@
     }
     return null;
   }
+  function describeError(err) {
+    if (err && err.name === "AbortError") return "Zeitüberschreitung";
+    if (err && /^HTTP \d+/.test(err.message)) return err.message;
+    return "Verbindung blockiert oder nicht erreichbar";
+  }
   function setBusy(busy) { goBtn.disabled = busy; goBtn.textContent = busy ? "Wird abgefragt …" : "Auflösen"; }
-  function clearResult() { dnsErr.hidden = true; dnsInfo.hidden = true; dnsTable.hidden = true; dnsBody.textContent = ""; }
+  function clearResult() { dnsErr.hidden = true; dnsInfo.hidden = true; dnsTable.hidden = true; dnsBody.textContent = ""; dnsSource.textContent = DEFAULT_SOURCE; }
   function showError(msg) { dnsErr.textContent = msg; dnsErr.hidden = false; }
+
+  async function resolveDns(name, type) {
+    const failures = [];
+    for (const p of PROVIDERS) {
+      try {
+        const data = await fetchJson(p.url(name, type), p.headers);
+        return { data, provider: p.label };
+      } catch (err) {
+        failures.push(p.label + ": " + describeError(err));
+      }
+    }
+    const e = new Error(failures.join(" | "));
+    e.failures = failures;
+    throw e;
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -189,8 +215,8 @@
     }
     setBusy(true);
     try {
-      const url = "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(name) + "&type=" + encodeURIComponent(type);
-      const data = await fetchJson(url, { accept: "application/dns-json" });
+      const { data, provider } = await resolveDns(name, type);
+      dnsSource.textContent = "Antwort von " + provider + " (DNS-over-HTTPS). Dein Browser fragt dort direkt an.";
       if (data.Status !== 0) { showError(STATUS[data.Status] || ("DNS-Fehler (Code " + data.Status + ")")); return; }
       const answers = Array.isArray(data.Answer) ? data.Answer : [];
       if (!answers.length) { dnsInfo.textContent = "Keine " + type + "-Einträge für " + name + " gefunden."; dnsInfo.hidden = false; return; }
@@ -212,7 +238,7 @@
       }
       dnsTable.hidden = false;
     } catch (err) {
-      showError("Die DNS-Abfrage ist fehlgeschlagen. Prüfe deine Verbindung oder Werbeblocker und versuche es erneut.");
+      showError("Die DNS-Abfrage ist fehlgeschlagen (" + err.message + "). Vermutlich blockiert dein Netzwerk, Werbeblocker oder Browser DNS-over-HTTPS. Probiere es in einem anderen Netz oder ohne Blocker.");
     } finally {
       setBusy(false);
     }
